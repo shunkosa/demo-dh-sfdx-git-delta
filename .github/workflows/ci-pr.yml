@@ -1,0 +1,108 @@
+# Unique name for this workflow
+name: CI on PR
+
+# Definition when the workflow should run
+on:
+    pull_request:
+        types: [opened, edited, synchronize, reopened]
+        
+# Jobs to be executed
+jobs:
+
+    # Formatting and linting only runs on human-submitted PRs
+    format-lint-lwc-tests:
+        runs-on: ubuntu-latest
+        steps:
+            # Checkout the source code
+            - name: 'Checkout source code'
+              uses: actions/checkout@v2
+
+            # Cache node_modules to speed up the process
+            - name: 'Restore node_modules cache'
+              id: cache-npm
+              uses: actions/cache@v1
+              with:
+                  path: node_modules
+                  key: npm-${{ hashFiles('**/package-lock.json') }}
+                  restore-keys: |
+                      npm-${{ env.cache-name }}-
+                      npm-
+
+            # Install npm dependencies for Prettier and Jest
+            - name: 'Install npm dependencies'
+              if: steps.cache-npm.outputs.cache-hit != 'true'
+              run: npm ci
+
+            # Prettier formatting
+            - name: 'Code formatting verification with Prettier'
+              run: npm run prettier:verify
+
+            # Lint LWC
+            - name: 'Lint Lightning Web Components'
+              run: npm run lint:lwc
+
+            # Lint Aura
+            - name: 'Lint Aura components'
+              run: npm run lint:aura
+
+            # LWC unit tests
+            - name: 'Unit test Lightning Web Components'
+              run: npm run test:unit:coverage
+
+    validate-deploy:
+        runs-on: ubuntu-latest
+        needs: format-lint-lwc-tests
+        steps:
+            # Install Salesforce CLI
+            - name: 'Install Salesforce CLI'
+              run: |
+                  wget https://developer.salesforce.com/media/salesforce-cli/sfdx/channels/stable/sfdx-linux-x64.tar.xz
+                  mkdir ~/sfdx
+                  tar xJf sfdx-linux-x64.tar.xz -C ~/sfdx --strip-components 1
+                  echo "$HOME/sfdx/bin" >> $GITHUB_PATH
+                  ~/sfdx/bin/sfdx version
+
+            # Install Plugin
+            - name : 'Install sfdx-git-delta'
+              run: echo 'y' | sfdx plugins:install sfdx-git-delta
+
+            # Checkout the source code
+            - name: 'Checkout source code'
+              uses: actions/checkout@v2
+              with:
+                fetch-depth: 0
+                ref: ${{github.event.pull_request.head.ref}}
+
+            # Store secret for DE org
+            - name: 'Populate auth file with DE_SFDX_URL secret'
+              shell: bash
+              run: echo ${{ secrets.DE_SFDX_URL}} > ./DE_SFDX_URL.txt
+
+            # Authenticate DE org
+            - name: 'Authenticate DE org'
+              run: sfdx auth:sfdxurl:store -f ./DE_SFDX_URL.txt -a de -d -s
+
+            # Generate package.xml / destructiveChanges.xml
+            - name: 'Generate manifest'
+              run: |
+                mkdir -p output
+                sfdx sgd:source:delta --to HEAD --from origin/${GITHUB_BASE_REF}
+                echo "package.xml"
+                cat output/package/package.xml
+                echo;
+                echo "destructiveChanges.xml"
+                cat output/destructiveChanges/destructiveChanges.xml
+
+            # Upload package.xml as artifact
+            - name: 'Upload xml files as artifact'
+              uses: actions/upload-artifact@v2
+              with:
+                name: manifest
+                path: ./output
+          
+            # Validate deploy with test
+            - name: 'Validate with test'
+              run:
+                if grep -q '<types>' output/package/package.xml; then
+                  SFDX_USE_PROGRESS_BAR=false sfdx force:source:deploy -x ./output/package/package.xml --testlevel RunLocalTests -c;
+                fi

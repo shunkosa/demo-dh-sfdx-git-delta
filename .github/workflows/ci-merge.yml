@@ -1,0 +1,69 @@
+# Unique name for this workflow
+name: CI on PR
+
+# Definition when the workflow should run
+on:
+    pull_request:
+        branches:
+          - develop/diff
+        types: [closed]
+        
+# Jobs to be executed
+jobs:
+
+    # Deploy and remove metadata using package.xml and destructiveChanges.xml
+    deploy:
+        runs-on: ubuntu-latest
+        if: github.event.pull_request.merged == true
+        steps:
+            # Install Salesforce CLI
+            - name: 'Install Salesforce CLI'
+              run: |
+                  wget https://developer.salesforce.com/media/salesforce-cli/sfdx/channels/stable/sfdx-linux-x64.tar.xz
+                  mkdir ~/sfdx
+                  tar xJf sfdx-linux-x64.tar.xz -C ~/sfdx --strip-components 1
+                  echo "$HOME/sfdx/bin" >> $GITHUB_PATH
+                  ~/sfdx/bin/sfdx version
+
+            # Install Plugin
+            - name : 'Install sfdx-git-delta'
+              run: echo 'y' | sfdx plugins:install sfdx-git-delta
+
+            # Checkout the source code
+            - name: 'Checkout source code'
+              uses: actions/checkout@v2
+
+            # Store secret for DE org
+            - name: 'Populate auth file with DE_SFDX_URL secret'
+              shell: bash
+              run: echo ${{ secrets.DE_SFDX_URL}} > ./DE_SFDX_URL.txt
+
+            # Authenticate DE org
+            - name: 'Authenticate DE org'
+              run: sfdx auth:sfdxurl:store -f ./DE_SFDX_URL.txt -a de -d -s
+
+            # Generate package.xml / destructiveChanges.xml
+            - name: 'Generate manifest'
+              run: |
+                mkdir -p output
+                sfdx sgd:source:delta --to HEAD --from origin/${GITHUB_BASE_REF}
+                echo "package.xml"
+                cat output/package/package.xml
+                echo;
+                echo "destructiveChanges.xml"
+                cat output/destructiveChanges/destructiveChanges.xml
+
+            # Deploy with test
+            - name: 'Validate with test'
+              run: |
+                if grep -q '<types>' output/package/package.xml; then
+                  SFDX_USE_PROGRESS_BAR=false sfdx force:source:deploy -x output/package/package.xml --testlevel RunLocalTests;
+                fi
+
+            # Remove metadata
+            - name: 'Remove metadata'
+              run: |
+                if grep -q '<types>' output/destructiveChanges/destructiveChanges.xml; then
+                  SFDX_USE_PROGRESS_BAR=false sfdx force:mdapi:deploy -d output/destructiveChanges --ignorewarnings;
+                fi
+                
