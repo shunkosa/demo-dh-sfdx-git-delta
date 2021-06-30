@@ -60,4 +60,9 @@ public with sharing class SampleDataController {
                 System.today() - Integer.valueof((Math.random() * 90));
         }
     }
+
+    public static void hello() {
+        System.debug(LoggingLevel.DEBUG, 'メソッド追加のデモ用です。');
+        // 何かいい感じの機能
+    }
 }
